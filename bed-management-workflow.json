@@ -1,0 +1,485 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "admission-request",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -128,
+        -80
+      ],
+      "id": "09cc79ba-6239-49a9-9f57-9beb324852c5",
+      "name": "Webhook",
+      "webhookId": "5b08cc9d-125c-447b-bcf2-4dfd20face47"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "id-1",
+              "name": "patientApiUrl",
+              "value": "<__PLACEHOLDER_VALUE__Patient API endpoint URL__>",
+              "type": "string"
+            },
+            {
+              "id": "id-2",
+              "name": "bedApiUrl",
+              "value": "<__PLACEHOLDER_VALUE__Bed availability API endpoint URL__>",
+              "type": "string"
+            },
+            {
+              "id": "id-3",
+              "name": "highUrgencyThreshold",
+              "value": 8,
+              "type": "number"
+            },
+            {
+              "id": "id-4",
+              "name": "lowConfidenceThreshold",
+              "value": 0.6,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "799bca0a-5af0-4977-af49-d8131ce5cb57",
+      "name": "Workflow Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        96,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Workflow Configuration').first().json.patientApiUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"patientId\": {{ $json.patientId }},\n  \"admissionSource\": {{ $json.admissionSource }}\n}",
+        "options": {}
+      },
+      "id": "ff15baa1-da49-4106-a943-7f5d8b004c65",
+      "name": "Fetch Patient Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        320,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Workflow Configuration').first().json.bedApiUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"department\": {{ $json.department }},\n  \"bedType\": {{ $json.bedType }}\n}",
+        "options": {}
+      },
+      "id": "a64f9051-f9b9-4dce-bcf3-44917e03c019",
+      "name": "Fetch Bed Availability",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        320,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "id-1",
+              "name": "patientDetails",
+              "value": "={{ $('Fetch Patient Details').first().json }}",
+              "type": "object"
+            },
+            {
+              "id": "id-2",
+              "name": "bedAvailability",
+              "value": "={{ $('Fetch Bed Availability').first().json }}",
+              "type": "object"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "f4dc993a-1d32-4366-a0ce-93ffce491c31",
+      "name": "Merge Patient and Bed Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        544,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Evaluate bed assignment logic\nconst items = $input.all();\n\n// Extract patient and bed data from merged input\nconst patientData = items[0].json.patientData || {};\nconst bedData = items[0].json.bedData || {};\n\n// Check if beds are available now\nconst availableBeds = bedData.availableBeds || [];\nconst bedAvailable = availableBeds.length > 0;\n\n// Assign bed if available\nlet assignedBedId = null;\nif (bedAvailable) {\n  assignedBedId = availableBeds[0].bedId || availableBeds[0].id || null;\n}\n\n// Calculate predicted ETA from expected discharges\nlet waitingETA = null;\nif (!bedAvailable && bedData.expectedDischarges) {\n  const discharges = bedData.expectedDischarges;\n  if (discharges.length > 0) {\n    // Find earliest discharge time\n    const earliestDischarge = discharges.sort((a, b) => new Date(a.expectedTime) - new Date(b.expectedTime))[0];\n    waitingETA = earliestDischarge.expectedTime;\n  }\n}\n\n// Determine urgency level from patient data (1-10 scale)\nlet urgencyLevel = 5; // default medium urgency\nif (patientData.condition) {\n  const condition = patientData.condition.toLowerCase();\n  if (condition.includes('critical') || condition.includes('emergency')) {\n    urgencyLevel = 10;\n  } else if (condition.includes('severe') || condition.includes('urgent')) {\n    urgencyLevel = 8;\n  } else if (condition.includes('moderate')) {\n    urgencyLevel = 6;\n  } else if (condition.includes('stable') || condition.includes('routine')) {\n    urgencyLevel = 3;\n  }\n}\n\n// Override urgency if explicitly provided\nif (patientData.urgencyLevel) {\n  urgencyLevel = Math.min(10, Math.max(1, patientData.urgencyLevel));\n}\n\n// Calculate confidence score (0-1 scale)\nlet confidenceScore = 0.8; // default high confidence\n\n// Reduce confidence if no beds available and no ETA\nif (!bedAvailable && !waitingETA) {\n  confidenceScore = 0.4;\n}\n\n// Reduce confidence if patient data is incomplete\nif (!patientData.condition || !patientData.patientId) {\n  confidenceScore = Math.max(0.3, confidenceScore - 0.3);\n}\n\n// Increase confidence if bed is available and patient data is complete\nif (bedAvailable && patientData.condition && patientData.patientId) {\n  confidenceScore = 0.95;\n}\n\n// Determine if requires approval (high urgency or low confidence)\nconst requiresApproval = urgencyLevel >= 8 || confidenceScore < 0.6;\n\n// Return results\nreturn [\n  {\n    json: {\n      bedAvailable,\n      assignedBedId,\n      waitingETA,\n      urgencyLevel,\n      confidenceScore,\n      requiresApproval,\n      patientData,\n      bedData\n    }\n  }\n];"
+      },
+      "id": "ef144eeb-af4b-4238-9894-a77dc0b15aa6",
+      "name": "Evaluate Bed Assignment Logic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "id-1",
+              "leftValue": "={{ $json.bedAvailable }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "adbef4ca-3615-4c3d-9863-2ca85f2adb40",
+      "name": "Check Bed Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        992,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "id-1",
+              "name": "admissionStatus",
+              "value": "BED_ASSIGNED",
+              "type": "string"
+            },
+            {
+              "id": "id-2",
+              "name": "assignedBed",
+              "value": "={{ $json.assignedBedId }}",
+              "type": "string"
+            },
+            {
+              "id": "id-3",
+              "name": "assignedAt",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "3024cec9-04d3-47dc-85d5-bc8d66344717",
+      "name": "Assign Bed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1216,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "id-1",
+              "name": "admissionStatus",
+              "value": "WAITING",
+              "type": "string"
+            },
+            {
+              "id": "id-2",
+              "name": "predictedETA",
+              "value": "={{ $json.waitingETA }}",
+              "type": "string"
+            },
+            {
+              "id": "id-3",
+              "name": "waitingSince",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "a3d776ba-4056-466a-9d6c-03f98767c2ce",
+      "name": "Place in Waiting State",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1216,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "id-1",
+              "leftValue": "={{ $json.requiresApproval }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "98eece57-c382-4195-8327-fe36af415cb0",
+      "name": "Check Requires Human Approval",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1440,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "limitWaitTime": true,
+        "resumeAmount": 24,
+        "options": {}
+      },
+      "id": "0dfdd0ac-4fe2-495e-8857-dfa835549159",
+      "name": "Wait for Human Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1664,
+        -152
+      ],
+      "webhookId": "841e15f5-cc01-4afd-a8d0-9b98882a8d11"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "id-1",
+              "name": "finalStatus",
+              "value": "={{ $json.admissionStatus }}",
+              "type": "string"
+            },
+            {
+              "id": "id-2",
+              "name": "processedAt",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            },
+            {
+              "id": "id-3",
+              "name": "approvalReceived",
+              "value": "={{ $json.requiresApproval ? 'YES' : 'NO' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "908aa7e9-b556-4d96-8c23-bec477f55c66",
+      "name": "Update Admission Status",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1888,
+        -80
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Workflow Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Workflow Configuration": {
+      "main": [
+        [
+          {
+            "node": "Fetch Patient Details",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Bed Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Patient Details": {
+      "main": [
+        [
+          {
+            "node": "Merge Patient and Bed Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Bed Availability": {
+      "main": [
+        [
+          {
+            "node": "Merge Patient and Bed Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Patient and Bed Data": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Bed Assignment Logic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Bed Assignment Logic": {
+      "main": [
+        [
+          {
+            "node": "Check Bed Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Bed Available": {
+      "main": [
+        [
+          {
+            "node": "Assign Bed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Place in Waiting State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign Bed": {
+      "main": [
+        [
+          {
+            "node": "Check Requires Human Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Place in Waiting State": {
+      "main": [
+        [
+          {
+            "node": "Check Requires Human Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Requires Human Approval": {
+      "main": [
+        [
+          {
+            "node": "Wait for Human Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Admission Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Human Approval": {
+      "main": [
+        [
+          {
+            "node": "Update Admission Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "088d6b3c-9579-4ec4-b68e-832b4e7d0766",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "7c19e542c17877eb9a058a7f92813a06bde2de4bec7ef24eaa5254ba5dfb08df"
+  },
+  "id": "vuiF9Ot4WFGucNMX",
+  "tags": []
+}
